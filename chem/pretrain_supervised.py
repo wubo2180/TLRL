@@ -74,7 +74,7 @@ def train(args, model,device, loader, optimizer,optimizer_SDG,guidance_dataset):
             
             #loss_SDG=(loss_SDG/(4))
     for x in pi_list:
-        x*sigma_r
+        # x*sigma_r
     loss_SDG=loss_SDG/n_j
     optimizer_SDG.step()
     optimizer_SDG.zero_grad()
