@@ -1,3 +1,11 @@
+<!--
+ * @Author: your name
+ * @Date: 2021-08-30 01:09:15
+ * @LastEditTime: 2021-08-30 01:10:06
+ * @LastEditors: Please set LastEditors
+ * @Description: In User Settings Edit
+ * @FilePath: \python workspace\pretrain-gnns\README.md
+-->
 # Strategies for Pre-training Graph Neural Networks
 
 This is a Pytorch implementation of the following paper: 
@@ -17,7 +25,7 @@ year={2020},
 url={https://openreview.net/forum?id=HJlWWJSFDH},
 }
 ```
-
+##hello
 ## Installation
 We used the following Python packages for core development. We tested on `Python 3.7`.
 ```
