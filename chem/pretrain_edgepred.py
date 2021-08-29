@@ -71,7 +71,7 @@ def main():
     parser.add_argument('--dataset', type=str, default = 'zinc_standard_agent', help='root directory of dataset. For now, only classification.')
     parser.add_argument('--output_model_file', type = str, default = '', help='filename to output the pre-trained model')
     parser.add_argument('--gnn_type', type=str, default="gin")
-    parser.add_argument('--num_workers', type=int, default = 8, help='number of workers for dataset loading')
+    parser.add_argument('--num_workers', type=int, default = 0, help='number of workers for dataset loading')
     args = parser.parse_args()
 
 
@@ -82,7 +82,7 @@ def main():
         torch.cuda.manual_seed_all(0)
 
     #set up dataset
-    dataset = MoleculeDataset("dataset/" + args.dataset, dataset=args.dataset, transform = NegativeEdge())
+    dataset = MoleculeDataset("./dataset/chem_dataset/dataset/" + args.dataset, dataset=args.dataset, transform = NegativeEdge())
 
     print(dataset[0])
 

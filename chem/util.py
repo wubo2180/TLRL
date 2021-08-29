@@ -9,7 +9,8 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from loader import mol_to_graph_data_obj_simple, \
     graph_data_obj_to_mol_simple
-
+import torch.functional as F
+import torch.nn as nn
 from loader import MoleculeDataset
 
 
@@ -17,6 +18,7 @@ def check_same_molecules(s1, s2):
     mol1 = AllChem.MolFromSmiles(s1)
     mol2 = AllChem.MolFromSmiles(s2)
     return AllChem.MolToInchi(mol1) == AllChem.MolToInchi(mol2)
+
 
 
 class NegativeEdge:

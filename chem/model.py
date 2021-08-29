@@ -5,7 +5,11 @@ from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_poo
 import torch.nn.functional as F
 from torch_scatter import scatter_add
 from torch_geometric.nn.inits import glorot, zeros
-
+import torch.nn as nn
+from torch_geometric.data import Batch
+import numpy as np
+import util as u
+from torch.distributions.bernoulli import Bernoulli
 num_atom_type = 120 #including the extra mask tokens
 num_chirality_tag = 3
 
@@ -46,8 +50,8 @@ class GINConv(MessagePassing):
 
         edge_embeddings = self.edge_embedding1(edge_attr[:,0]) + self.edge_embedding2(edge_attr[:,1])
 
-        return self.propagate(self.aggr, edge_index, x=x, edge_attr=edge_embeddings)
-
+        #return self.propagate(self.aggr, edge_index, x=x, edge_attr=edge_embeddings)
+        return self.propagate( edge_index[0], x=x, edge_attr=edge_embeddings)
     def message(self, x_j, edge_attr):
         return x_j + edge_attr
 
@@ -98,8 +102,8 @@ class GCNConv(MessagePassing):
 
         x = self.linear(x)
 
-        return self.propagate(self.aggr, edge_index, x=x, edge_attr=edge_embeddings, norm = norm)
-
+        #return self.propagate(self.aggr, edge_index, x=x, edge_attr=edge_embeddings, norm = norm)
+        return self.propagate(edge_index[0], x=x, edge_attr=edge_embeddings, norm = norm)
     def message(self, x_j, edge_attr, norm):
         return norm.view(-1, 1) * (x_j + edge_attr)
 
@@ -289,7 +293,28 @@ class GNN(torch.nn.Module):
 
         return node_representation
 
+# class SDG(nn.Module):
+#     def __init__(self,emb_dim,hidden):
+#         super(SDG,self).__init__()
+#         self.SDG=nn.Sequential(
+#             nn.Linear(emb_dim,hidden),
+#             nn.ReLU(),
+#             nn.Linear(hidden,1),
+#             nn.Sigmoid()
+#             )
+#     def forward(self,x):
+#         return self.SDG(x)
 
+def js_loss(p_output, q_output,get_softmax=True):
+    """
+    Function that measures JS divergence between target and output logits:
+    """
+    KLDivLoss = nn.KLDivLoss(reduction='batchmean')
+    if get_softmax:
+        p_output = F.softmax(p_output,dim=1)
+        q_output = F.softmax(q_output,dim=1)
+    log_mean_output = ((p_output + q_output )/2).log()
+    return (KLDivLoss(log_mean_output, p_output) + KLDivLoss(log_mean_output, q_output))/2
 class GNN_graphpred(torch.nn.Module):
     """
     Extension of GIN to incorporate edge information by concatenation.
@@ -306,24 +331,149 @@ class GNN_graphpred(torch.nn.Module):
     See https://arxiv.org/abs/1810.00826
     JK-net: https://arxiv.org/abs/1806.03536
     """
-    def __init__(self, num_layer, emb_dim, num_tasks, JK = "last", drop_ratio = 0, graph_pooling = "mean", gnn_type = "gin"):
+    def __init__(self, num_layer, emb_dim, num_tasks,guidance_num_tasks,batch_size,hidden,device,JK = "last", drop_ratio = 0, graph_pooling = "mean", gnn_type = "gin"):
         super(GNN_graphpred, self).__init__()
         self.num_layer = num_layer
         self.drop_ratio = drop_ratio
         self.JK = JK
         self.emb_dim = emb_dim
         self.num_tasks = num_tasks
+        self.guidance_num_tasks=guidance_num_tasks
+        #self.D=torch.bernoulli(torch.randn(batch_size,1).uniform_(0,1)).to(device)
+        self.device=device
+        self.relu=nn.ReLU()
+        #self.guidance_dataset=guidance_dataset
+        self.SDG=nn.Sequential(
+            nn.Linear(emb_dim,hidden),
+            nn.ReLU(),
+            nn.Linear(hidden,1),
+            nn.Sigmoid()
+            )
+        #self.state=torch.randn(1)[0]
+        #self.selction=torch.tesno
 
         if self.num_layer < 2:
             raise ValueError("Number of GNN layers must be greater than 1.")
 
         self.gnn = GNN(num_layer, emb_dim, JK, drop_ratio, gnn_type = gnn_type)
-
+        
         #Different kind of graph pooling
         if graph_pooling == "sum":
             self.pool = global_add_pool
         elif graph_pooling == "mean":
             self.pool = global_mean_pool
+            self.pool1 = global_mean_pool
+        elif graph_pooling == "max":
+            self.pool = global_max_pool
+        elif graph_pooling == "attention":
+            if self.JK == "concat":
+                self.pool = GlobalAttention(gate_nn = torch.nn.Linear((self.num_layer + 1) * emb_dim, 1))
+            else:
+                self.pool = GlobalAttention(gate_nn = torch.nn.Linear(emb_dim, 1))
+        elif graph_pooling[:-1] == "set2set":
+            set2set_iter = int(graph_pooling[-1])
+            if self.JK == "concat":
+                self.pool = Set2Set((self.num_layer + 1) * emb_dim, set2set_iter)
+            else:
+                self.pool = Set2Set(emb_dim, set2set_iter)
+        else:
+            raise ValueError("Invalid graph pooling type.")
+
+        #For graph-level binary classification
+        if graph_pooling[:-1] == "set2set":
+            self.mult = 2
+        else:
+            self.mult = 1
+        
+        if self.JK == "concat":
+            self.graph_pred_linear = torch.nn.Linear(self.mult * (self.num_layer + 1) * self.emb_dim, self.num_tasks)
+            self.graph_pred_linear_guidance = torch.nn.Linear(self.mult * (self.num_layer + 1) * self.emb_dim, self.guidance_num_tasks)
+        else:
+            self.graph_pred_linear = torch.nn.Linear(self.mult * self.emb_dim, self.num_tasks)
+            self.graph_pred_linear_guidance = torch.nn.Linear(self.mult * self.emb_dim, self.guidance_num_tasks)
+
+
+    def from_pretrained(self, model_file):
+        #self.gnn = GNN(self.num_layer, self.emb_dim, JK = self.JK, drop_ratio = self.drop_ratio)
+        self.gnn.load_state_dict(torch.load(model_file))
+
+    def forward(self, *argv):
+        if len(argv) == 4:
+            x, edge_index, edge_attr, batch = argv[0], argv[1], argv[2], argv[3]
+        elif len(argv) == 2:
+            data ,guidance_dataset= argv[0],argv[1]
+            #x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
+        else:
+            raise ValueError("unmatched number of arguments.")
+        #if 
+        
+        #index=torch.from_numpy(np.argwhere(self.D.cpu().numpy()>0.5)).to(self.device)
+        
+        #get source embedding (batch, num_graph_nodes,emb_dim) e.g. (32,760,300)
+        node_representation = self.gnn(data.x, data.edge_index, data.edge_attr)
+        # readout graph (batch,emb_dim) e.g. (32,300)
+        node_representation=self.pool(node_representation, data.batch)
+        
+        # update D #D_select shape (batch_size,1) e.g. (32,1) reshape to (1,)
+        probs =self.SDG(node_representation).squeeze()
+        #temp.retain_grad()
+        m=Bernoulli(probs)
+        action =m.sample()
+        D_select=action.long()
+        # select source embedding and data via D_select, i.e. take action
+        data_=Batch.from_data_list(data.index_select(D_select))
+        x=node_representation[D_select]
+        #node_representation.retain_grad()
+        pred=self.graph_pred_linear(x)
+        # get target embedding
+
+        guidance_representation = self.gnn(guidance_dataset.x, guidance_dataset.edge_index, guidance_dataset.edge_attr)
+
+        guidance_representation=self.pool(guidance_representation, guidance_dataset.batch)
+
+        guidance_representation=torch.mean(guidance_representation,dim=0).unsqueeze(dim=0)
+        x=torch.mean(x,dim=0).unsqueeze(dim=0)
+        js=js_loss(x,guidance_representation)
+        #calculating js divergence between source and target
+        pi=-m.log_prob(action)
+        return data_,pred,action,pi,js
+
+# class pre_GNN_ReT(nn.Module):
+#     def __init__(self,num_layer, emb_dim, num_tasks,guidance_num_tasks,batch_size,hidden,device,JK = "last", drop_ratio = 0, graph_pooling = "mean", gnn_type = "gin"):
+#         super(pre_GNN_ReT, self).__init__()
+
+#         self.GNN_graph=GNN_graphpred(num_layer, emb_dim, num_tasks,batch_size,hidden,device,JK = "last", drop_ratio = 0, graph_pooling = "mean", gnn_type = "gin")
+#         #self.GNN_graph2=GNN_graphpred()
+#         if self.JK == "concat":
+#             self.graph_pred_linear = torch.nn.Linear(self.mult * (self.num_layer + 1) * self.emb_dim, self.num_tasks)
+#             #self.graph_pred_linear_guidance = torch.nn.Linear(self.mult * (self.num_layer + 1) * self.emb_dim, self.guidance_num_tasks)
+#         else:
+#             self.graph_pred_linear = torch.nn.Linear(self.mult * self.emb_dim, self.num_tasks)
+#             #self.graph_pred_linear_guidance = torch.nn.Linear(self.mult * self.emb_dim, self.guidance_num_tasks)
+#     def forward(self,x):
+#         x=self.GNN_graph(x)
+class GNN_finetune(torch.nn.Module):
+    def __init__(self, num_layer, emb_dim, num_tasks,JK = "last", drop_ratio = 0, graph_pooling = "mean", gnn_type = "gin"):
+        super(GNN_finetune,self).__init__()
+
+        self.num_layer = num_layer
+        self.drop_ratio = drop_ratio
+        self.JK = JK
+        self.emb_dim = emb_dim
+        self.num_tasks = num_tasks
+
+
+        if self.num_layer < 2:
+            raise ValueError("Number of GNN layers must be greater than 1.")
+
+        self.gnn = GNN(num_layer, emb_dim, JK, drop_ratio, gnn_type = gnn_type)
+        
+        #Different kind of graph pooling
+        if graph_pooling == "sum":
+            self.pool = global_add_pool
+        elif graph_pooling == "mean":
+            self.pool = global_mean_pool
+            self.pool1 = global_mean_pool
         elif graph_pooling == "max":
             self.pool = global_max_pool
         elif graph_pooling == "attention":
@@ -351,6 +501,8 @@ class GNN_graphpred(torch.nn.Module):
         else:
             self.graph_pred_linear = torch.nn.Linear(self.mult * self.emb_dim, self.num_tasks)
 
+
+
     def from_pretrained(self, model_file):
         #self.gnn = GNN(self.num_layer, self.emb_dim, JK = self.JK, drop_ratio = self.drop_ratio)
         self.gnn.load_state_dict(torch.load(model_file))
@@ -360,15 +512,21 @@ class GNN_graphpred(torch.nn.Module):
             x, edge_index, edge_attr, batch = argv[0], argv[1], argv[2], argv[3]
         elif len(argv) == 1:
             data = argv[0]
-            x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
+            #x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         else:
             raise ValueError("unmatched number of arguments.")
+        #if 
+        
+        #index=torch.from_numpy(np.argwhere(self.D.cpu().numpy()>0.5)).to(self.device)
+        
+        #get source embedding (batch, num_graph_nodes,emb_dim) e.g. (32,760,300)
+        node_representation = self.gnn(data.x, data.edge_index, data.edge_attr)
+        # readout graph (batch,emb_dim) e.g. (32,300)
+        node_representation=self.pool(node_representation, data.batch)
 
-        node_representation = self.gnn(x, edge_index, edge_attr)
-
-        return self.graph_pred_linear(self.pool(node_representation, batch))
-
-
+        node_representation=self.graph_pred_linear(node_representation)
+        # get target embedding
+        return node_representation
 if __name__ == "__main__":
     pass
 
