@@ -1,0 +1,22 @@
+bio: gcn,graphsage,gat,gin
+chem: graphsage,gcn,gin
+dblp:gin,gcn,graphsage
+chem
+    gin
+        bbbp 65 73.04
+        tox21 10 76.83
+        toxcast 5 64.76
+        sider 10 63.28
+        clintox 20 85.78
+        bace 5 83.79
+        muv 10 77.32
+        hiv 20 78.32
+
+bio:
+    graphsage 50 71.68
+
+dblp:
+    graphsage 10 68.34
+    gcn 5 
+    gin 5 
+    gat 5 
